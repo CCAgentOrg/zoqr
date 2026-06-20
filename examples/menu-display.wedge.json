@@ -1,0 +1,21 @@
+{
+  "id": "menu-display",
+  "name": "Menu Display",
+  "version": "1.0.0",
+  "description": "Restaurant table QR showing menu with optional dish feedback form.",
+  "author": "cashlessconsumer",
+  "content_schema": {
+    "blocks": [
+      {"type": "text", "required": true, "max": 20},
+      {"type": "image", "required": false, "max": 10},
+      {"type": "link", "required": false, "max": 5},
+      {"type": "file", "required": false, "max": 3}
+    ],
+    "form": {
+      "fields": [
+        {"key": "rating", "label": "How was your meal?", "type": "select", "options": ["1", "2", "3", "4", "5"]},
+        {"key": "comment", "label": "Comments", "type": "text", "optional": true}
+      ]
+    }
+  }
+}

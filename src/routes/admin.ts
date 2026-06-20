@@ -10,6 +10,7 @@
  *   GET    /admin/wedges           list installed wedges
  *   POST   /admin/wedges           install wedge
  *   DELETE /admin/wedges/:id       uninstall wedge
+ *   GET    /admin/registry         browse wedges from upstream registry (cached)
  *   GET    /admin/scans/:slug      scan summary (last N days)
  *   GET    /admin/submissions/:slug fetch form responses
  */
@@ -125,6 +126,89 @@ admin.delete("/wedges/:id", (c) => {
   if (!getWedge(tenant, id)) return c.json({ error: "Not found" }, 404);
   uninstallWedge(tenant, id);
   return c.json({ ok: true });
+});
+
+// ---- Registry browser -----------------------------------------
+// Proxies INDEX.json from the upstream wedges registry so the admin SPA
+// can browse/install community wedges without CORS pain. Cached in-memory
+// for 5 minutes — the registry is append-only with semver tags, so this is
+// safe. Override the URL with ZOQR_REGISTRY_URL for testing/forking.
+
+const REGISTRY_URL =
+  process.env.ZOQR_REGISTRY_URL ||
+  "https://raw.githubusercontent.com/CCAgentOrg/zoqr-wedges/main/INDEX.json";
+const REGISTRY_TTL_MS = 5 * 60 * 1000;
+const MANIFEST_TIMEOUT_MS = 3500;
+
+interface RegistryCacheEntry {
+  fetchedAt: number;
+  body: { source: string; index: unknown; wedges: unknown[] };
+}
+const registryCache = new Map<string, RegistryCacheEntry>();
+
+const slugToTitle = (slug: string) =>
+  slug
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+
+async function fetchManifest(baseUrl: string, id: string, version: string) {
+  const url = `${baseUrl.replace(/\/INDEX\.json$/, "")}/${id}/${version}/manifest.json`;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), MANIFEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: ctl.signal, headers: { Accept: "application/json" } });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+admin.get("/registry", async (c) => {
+  const force = c.req.query("fresh") === "1";
+  const cached = registryCache.get(REGISTRY_URL);
+  const now = Date.now();
+  if (!force && cached && now - cached.fetchedAt < REGISTRY_TTL_MS) {
+    return c.json({ ...cached.body, cached: true, age_ms: now - cached.fetchedAt });
+  }
+  try {
+    const res = await fetch(REGISTRY_URL, {
+      headers: { Accept: "application/json", "User-Agent": "zoqr-admin" },
+    });
+    if (!res.ok) {
+      if (cached) {
+        return c.json({ ...cached.body, cached: true, stale: true, age_ms: now - cached.fetchedAt });
+      }
+      return c.json({ error: `Registry upstream ${res.status}` }, 502);
+    }
+    const index = (await res.json()) as { wedges?: Array<{ id: string; latest: string; versions?: string[]; homepage?: string }> };
+    const baseUrl = REGISTRY_URL.replace(/\/INDEX\.json$/, "");
+    const enriched = await Promise.all(
+      (index.wedges || []).map(async (w) => {
+        const manifest = await fetchManifest(baseUrl, w.id, w.latest);
+        return {
+          id: w.id,
+          name: manifest?.name || slugToTitle(w.id),
+          description: manifest?.description || "",
+          category: manifest?.category || "Other",
+          latest: w.latest,
+          versions: w.versions || [w.latest],
+          homepage: w.homepage,
+        };
+      })
+    );
+    const body = { source: REGISTRY_URL, index, wedges: enriched };
+    registryCache.set(REGISTRY_URL, { fetchedAt: now, body });
+    return c.json({ ...body, cached: false });
+  } catch (e) {
+    if (cached) {
+      return c.json({ ...cached.body, cached: true, stale: true, age_ms: now - cached.fetchedAt });
+    }
+    return c.json({ error: `Registry unreachable: ${(e as Error).message}` }, 502);
+  }
 });
 
 // ---- Analytics --------------------------------------------------

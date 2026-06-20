@@ -138,7 +138,7 @@ function Login({ onLogin }) {
 }
 
 // ---------- QR list ----------
-function QRList({ qrs, activeSlug, onSelect, onCreate, wedges }) {
+function QRList({ qrs, activeSlug, onSelect, onCreate, wedges, onBrowseRegistry }) {
   return html`
     <aside>
       <div style=${{ padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
@@ -147,6 +147,15 @@ function QRList({ qrs, activeSlug, onSelect, onCreate, wedges }) {
             QRs (${qrs.length})
           </span>
           <button onClick=${onCreate}>+ New</button>
+        </div>
+        <div style=${{ marginTop: 8 }}>
+          <button
+            class="secondary"
+            style=${{ width: "100%", fontSize: 12 }}
+            onClick=${onBrowseRegistry}
+          >
+            Browse wedge registry →
+          </button>
         </div>
       </div>
       ${qrs.length === 0
@@ -171,6 +180,115 @@ function QRList({ qrs, activeSlug, onSelect, onCreate, wedges }) {
             `
           )}
     </aside>
+  `;
+}
+
+// ---------- Registry browser ----------
+function RegistryBrowser({ onInstall, onClose, busy }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [query, setQuery] = useState("");
+  const [activeCat, setActiveCat] = useState("All");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/admin/registry", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch((e) => { if (!cancelled) setErr(e.message); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const wedges = data?.wedges || [];
+  const categories = ["All", ...new Set(wedges.map((w) => w.category || "Other"))];
+  const q = query.trim().toLowerCase();
+  const filtered = wedges.filter((w) => {
+    if (activeCat !== "All" && (w.category || "Other") !== activeCat) return false;
+    if (!q) return true;
+    return (
+      (w.id || "").toLowerCase().includes(q) ||
+      (w.name || "").toLowerCase().includes(q) ||
+      (w.description || "").toLowerCase().includes(q)
+    );
+  });
+
+  return html`
+    <div class="modal-backdrop" onClick=${onClose}>
+      <div
+        class="modal"
+        style=${{ maxWidth: 720, width: "92vw", maxHeight: "85vh" }}
+        onClick=${(e) => e.stopPropagation()}
+      >
+        <div class="modal-header">
+          <h2>Wedge registry</h2>
+          <button class="secondary" onClick=${onClose}>Close</button>
+        </div>
+        <div style=${{ padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
+          <input
+            type="search"
+            placeholder="Search by id, name, or description…"
+            value=${query}
+            onInput=${(e) => setQuery(e.target.value)}
+            style=${{ width: "100%" }}
+          />
+          <div style=${{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+            ${categories.map(
+              (c) => html`
+                <button
+                  key=${c}
+                  class=${"chip" + (c === activeCat ? " active" : "")}
+                  onClick=${() => setActiveCat(c)}
+                >
+                  ${c}
+                </button>
+              `
+            )}
+          </div>
+        </div>
+        <div style=${{ padding: "0 16px 16px", overflowY: "auto", maxHeight: "60vh" }}>
+          ${err && html`<div class="err">Failed to load registry: ${err}</div>`}
+          ${data?.stale && html`
+            <div class="warn" style=${{ padding: 10, margin: "12px 0", borderRadius: 6 }}>
+              ⚠ Showing cached registry (upstream unavailable, ${Math.round((data.age_ms || 0) / 1000)}s old).
+            </div>
+          `}
+          ${data && !err && filtered.length === 0 && html`
+            <div class="empty">No wedges match this filter.</div>
+          `}
+          ${filtered.map(
+            (w) => html`
+              <div
+                key=${w.id}
+                style=${{
+                  padding: "12px 0",
+                  borderBottom: "1px solid var(--border)",
+                  display: "flex",
+                  gap: 12,
+                  alignItems: "flex-start",
+                }}
+              >
+                <div style=${{ flex: 1 }}>
+                  <div style=${{ fontWeight: 600 }}>${w.name || w.id}</div>
+                  <div style=${{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                    ${w.id} · ${w.category || "Other"}
+                  </div>
+                  <div style=${{ marginTop: 4, fontSize: 13 }}>${w.description || ""}</div>
+                </div>
+                <button
+                  disabled=${busy}
+                  onClick=${() => onInstall(w)}
+                  title=${"Install " + w.id}
+                >
+                  Install
+                </button>
+              </div>
+            `
+          )}
+        </div>
+        <div style=${{ padding: "8px 16px", borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--muted)" }}>
+          ${wedges.length} wedges · last fetch ${data ? new Date(Date.now() - (data.age_ms || 0)).toLocaleTimeString() : "—"}</div>
+      </div>
+    </div>
   `;
 }
 
@@ -547,6 +665,7 @@ function App() {
   const [activeSlug, setActiveSlug] = useState(null);
   const [draft, setDraft] = useState(null);
   const [showNew, setShowNew] = useState(false);
+  const [showRegistry, setShowRegistry] = useState(false);
   const [busy, setBusy] = useState(false);
   const publicBase = (typeof window !== "undefined" && window.ZOQR_PAGES_BASE) || "";
 
@@ -613,6 +732,24 @@ function App() {
     }
   }
 
+  async function installWedge(w) {
+    setBusy(true);
+    try {
+      const version = w.latest || "1.0.0";
+      const base_url = w.homepage
+        ? w.homepage.replace(/\/[^/]+\/[^/]+\/[^/]+\/[^/]+$/, "")
+        : "";
+      const res = await api("/wedges", { method: "POST", body: { id: w.id, name: w.name, version, base_url } });
+      await refresh();
+      setShowRegistry(false);
+      push("Installed " + w.id + (res.version ? " v" + res.version : ""));
+    } catch (e) {
+      push(e.message, "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function remove() {
     if (!draft) return;
     if (!confirm("Delete " + draft.slug + "?")) return;
@@ -662,6 +799,7 @@ function App() {
           activeSlug=${activeSlug}
           onSelect=${(s) => setActiveSlug(s)}
           onCreate=${() => setShowNew(true)}
+          onBrowseRegistry=${() => setShowRegistry(true)}
           wedges=${wedges}
         />
         ${draft
@@ -690,6 +828,12 @@ function App() {
       html`<${NewQR}
         onCreate=${createQR}
         onCancel=${() => setShowNew(false)}
+        busy=${busy}
+      />`}
+      ${showRegistry &&
+      html`<${RegistryBrowser}
+        onInstall=${installWedge}
+        onClose=${() => setShowRegistry(false)}
         busy=${busy}
       />`}
       <${Toasts} toasts=${toasts} />

@@ -4,24 +4,31 @@
  *
  *   GET    /admin/qrs              list QRs for current tenant
  *   POST   /admin/qrs              create QR
+ *   POST   /admin/qrs/bulk         bulk-create from range specs
  *   GET    /admin/qrs/:slug        fetch a QR (incl. inactive)
  *   PATCH  /admin/qrs/:slug        update QR
  *   DELETE /admin/qrs/:slug        delete QR
+ *   GET    /admin/locations        distinct locations for this tenant
+ *   GET    /admin/tags             distinct tags for this tenant
  *   GET    /admin/wedges           list installed wedges
  *   POST   /admin/wedges           install wedge
  *   DELETE /admin/wedges/:id       uninstall wedge
  *   GET    /admin/registry         browse wedges from upstream registry (cached)
  *   GET    /admin/scans/:slug      scan summary (last N days)
  *   GET    /admin/submissions/:slug fetch form responses
+ *   GET    /admin/print            print sheet (HTML) for a location or all
  */
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import {
   createQR,
+  bulkCreateQRs,
   deleteQR,
   getQR,
   listQRs,
   listWedges,
+  listLocations,
+  listTags,
   installWedge,
   uninstallWedge,
   updateQR,
@@ -31,11 +38,14 @@ import {
 } from "../db.ts";
 import { bearerToken, requireMasterToken } from "../lib/auth.ts";
 import { slugify, isReservedSlug, uniquify } from "../lib/slug.ts";
+import { parseRange } from "../lib/range.ts";
 import {
   QRCreateSchema,
+  QRBulkCreateSchema,
   QRUpdateSchema,
   WedgeInstallSchema,
 } from "../lib/schemas.ts";
+import { tenantFrom as _tenantFrom } from "./_shared.ts";
 
 export const admin = new Hono();
 
@@ -52,8 +62,7 @@ admin.use("*", async (c, next) => {
   await next();
 });
 
-const tenantFromQuery = (c: { req: { query: (k: string) => string | undefined } }) =>
-  c.req.query("tenant") ?? "demo";
+const tenantFromQuery = _tenantFrom;
 
 // ---- QRs --------------------------------------------------------
 
@@ -80,8 +89,54 @@ admin.post("/qrs", zValidator("json", QRCreateSchema), async (c) => {
     title: body.title,
     wedge_id: body.wedge_id ?? null,
     content: body.content,
+    location: body.location ?? null,
+    tags: body.tags ?? [],
   });
   return c.json(qr, 201);
+});
+
+// Bulk create: each spec.raw is expanded via the range parser. Slugs that
+// collide with existing QRs in this tenant are silently skipped (the
+// client only learns the count actually created).
+admin.post("/qrs/bulk", zValidator("json", QRBulkCreateSchema), async (c) => {
+  const tenant = tenantFromQuery(c);
+  const { specs } = c.req.valid("json");
+
+  // Build the "taken" set ONCE, then for each spec expand and skip conflicts.
+  const taken = new Set(listQRs(tenant).map((q) => q.slug));
+  const all: { slug: string; title: string; wedge_id: string | null; content: unknown; location: string | null; tags: string[] }[] = [];
+  let skipped = 0;
+  for (const spec of specs) {
+    const expanded = parseRange(spec.raw, taken);
+    if (expanded.length === 0) {
+      skipped++;
+      continue;
+    }
+    for (const ex of expanded) {
+      taken.add(ex.slug); // protect against in-batch duplicates
+      all.push({
+        slug: ex.slug,
+        title: spec.title,
+        wedge_id: spec.wedge_id ?? null,
+        content: spec.content,
+        location: spec.location ?? null,
+        tags: spec.tags ?? [],
+      });
+    }
+  }
+
+  if (all.length === 0) {
+    return c.json({ error: "No QRs to create (all slugs taken or range empty)" }, 400);
+  }
+  if (all.length > 200) {
+    return c.json(
+      { error: `Bulk limit exceeded: ${all.length} > 200. Split into smaller batches.` },
+      413
+    );
+  }
+
+  const created = bulkCreateQRs(tenant, all);
+  return c.json({ ok: true, count: created.length, skipped, qrs: created }, 201);
 });
 
 admin.get("/qrs/:slug", (c) => {
@@ -225,4 +280,111 @@ admin.get("/submissions/:slug", (c) => {
   const slug = c.req.param("slug");
   const limit = Number(c.req.query("limit") ?? "100");
   return c.json(listSubmissions(tenant, slug, limit));
+});
+
+// ---- Print sheet ------------------------------------------------
+//
+// A4-friendly HTML view of all QRs (or a filtered subset by location / tag),
+// each card showing the QR SVG, title, and slug. Built-in window.print() button.
+// QRs are fetched inline by the browser (cached for 1h).
+
+const esc = (s: string) =>
+  s.replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[ch]!));
+
+function resolveBase(c: any): string {
+  const proto = c.req.header("x-forwarded-proto") ?? "http";
+  const host = c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "localhost";
+  return `${proto}://${host}`;
+}
+
+admin.get("/print", (c) => {
+  const tenant = tenantFromQuery(c);
+  const locFilter = c.req.query("location");
+  const tagFilter = c.req.query("tag");
+  const title = c.req.query("title") ?? `Print — ${tenant}`;
+
+  let qrs = listQRs(tenant).filter((q) => q.status === "active");
+  if (locFilter) qrs = qrs.filter((q) => q.location === locFilter);
+  if (tagFilter) {
+    qrs = qrs.filter((q) => {
+      try {
+        return (JSON.parse(q.tags_json || "[]") as string[]).includes(tagFilter);
+      } catch {
+        return false;
+      }
+    });
+  }
+  // Stable order: by location, then slug.
+  qrs.sort((a, b) => {
+    const la = a.location ?? "zz";
+    const lb = b.location ?? "zz";
+    if (la !== lb) return la.localeCompare(lb);
+    return a.slug.localeCompare(b.slug);
+  });
+
+  const base = resolveBase(c);
+  const cards = qrs
+    .map(
+      (q) => `
+    <div class="card">
+      <img src="${esc(base)}/q/${encodeURIComponent(q.slug)}/qr.svg" alt="${esc(q.slug)}">
+      <div class="title">${esc(q.title)}</div>
+      <div class="slug">${esc(q.slug)}</div>
+      ${q.location ? `<div class="loc">${esc(q.location)}</div>` : ""}
+    </div>
+  `
+    )
+    .join("");
+
+  const filterLine = [
+    locFilter ? `Location: <b>${esc(locFilter)}</b>` : "",
+    tagFilter ? `Tag: <b>${esc(tagFilter)}</b>` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return c.html(
+    `<!doctype html>
+<html><head><meta charset="utf-8"><title>${esc(title)}</title>
+<style>
+  @page { margin: 8mm; }
+  * { box-sizing: border-box; }
+  body { font: 12px system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; color: #111; background: #fff; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .meta { color: #555; margin-bottom: 16px; font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .card { border: 1px dashed #999; padding: 12px; text-align: center; page-break-inside: avoid; background: #fff; }
+  .card img { width: 100%; max-width: 38mm; height: auto; aspect-ratio: 1; }
+  .card .title { font-weight: 600; margin-top: 6px; font-size: 12px; word-break: break-word; }
+  .card .slug { font-family: ui-monospace, monospace; font-size: 10px; color: #666; margin-top: 2px; }
+  .card .loc { font-size: 10px; color: #888; margin-top: 2px; font-style: italic; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+  .toolbar button { padding: 6px 12px; font: inherit; cursor: pointer; }
+  @media print { .toolbar { display: none; } body { padding: 0; } }
+</style></head>
+<body>
+  <div class="toolbar">
+    <h1 style="margin:0;flex:1">${esc(title)}</h1>
+    <button onclick="window.print()">🖨 Print</button>
+  </div>
+  <div class="meta">${qrs.length} QRs${filterLine ? " · " + filterLine : ""}</div>
+  <div class="grid">${cards}</div>
+</body></html>`,
+    200,
+    { "Content-Type": "text/html; charset=utf-8" }
+  );
+});
+
+admin.get("/locations", (c) => {
+  return c.json(listLocations(tenantFromQuery(c)));
+});
+
+admin.get("/tags", (c) => {
+  return c.json(listTags(tenantFromQuery(c)));
 });

@@ -10,7 +10,6 @@
  */
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
-import { z } from "zod";
 import {
   getQR,
   listQRs,
@@ -19,6 +18,7 @@ import {
   scanCount,
 } from "../db.ts";
 import { hashIp, bearerToken } from "../lib/auth.ts";
+import { tenantFrom } from "./_shared.ts";
 import { SubmitSchema, ScanSchema } from "../lib/schemas.ts";
 
 export const api = new Hono();
@@ -26,7 +26,7 @@ export const api = new Hono();
 // Public read -----------------------------------------------------
 
 api.get("/qr/:slug", (c) => {
-  const tenant = c.req.header("x-zoqr-tenant") ?? "demo";
+  const tenant = tenantFrom(c);
   const slug = c.req.param("slug");
   const qr = getQR(tenant, slug);
   if (!qr || qr.status !== "active") {
@@ -42,7 +42,7 @@ api.get("/qr/:slug", (c) => {
 });
 
 api.get("/qrs", (c) => {
-  const tenant = c.req.header("x-zoqr-tenant") ?? "demo";
+  const tenant = tenantFrom(c);
   const all = listQRs(tenant).filter((q) => q.status === "active");
   return c.json(
     all.map((q) => ({
@@ -57,7 +57,7 @@ api.get("/qrs", (c) => {
 
 api.post("/submit", zValidator("json", SubmitSchema), async (c) => {
   const body = c.req.valid("json");
-  const tenant = c.req.header("x-zoqr-tenant") ?? "demo";
+  const tenant = tenantFrom(c);
   const qr = getQR(tenant, body.slug);
   if (!qr || qr.status !== "active") {
     return c.json({ error: "Not found" }, 404);
@@ -73,7 +73,7 @@ api.post("/submit", zValidator("json", SubmitSchema), async (c) => {
 
 api.post("/scan", zValidator("json", ScanSchema), async (c) => {
   const { slug, referer } = c.req.valid("json");
-  const tenant = c.req.header("x-zoqr-tenant") ?? "demo";
+  const tenant = tenantFrom(c);
   const qr = getQR(tenant, slug);
   if (!qr || qr.status !== "active") {
     return c.json({ error: "Not found" }, 404);

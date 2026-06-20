@@ -138,7 +138,7 @@ function Login({ onLogin }) {
 }
 
 // ---------- QR list ----------
-function QRList({ qrs, activeSlug, onSelect, onCreate, wedges, onBrowseRegistry }) {
+function QRList({ qrs, activeSlug, onSelect, onCreate, onBulk, onPrint, wedges, onBrowseRegistry, locations, allTags, filterLoc, setFilterLoc, filterTag, setFilterTag }) {
   return html`
     <aside>
       <div style=${{ padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
@@ -147,6 +147,14 @@ function QRList({ qrs, activeSlug, onSelect, onCreate, wedges, onBrowseRegistry 
             QRs (${qrs.length})
           </span>
           <button onClick=${onCreate}>+ New</button>
+        </div>
+        <div class="row" style=${{ marginTop: 8, gap: 4 }}>
+          <button class="secondary" style=${{ flex: 1, fontSize: 12 }} onClick=${onBulk}>
+            + Bulk
+          </button>
+          <button class="secondary" style=${{ flex: 1, fontSize: 12 }} onClick=${onPrint}>
+            Print sheet
+          </button>
         </div>
         <div style=${{ marginTop: 8 }}>
           <button
@@ -157,11 +165,27 @@ function QRList({ qrs, activeSlug, onSelect, onCreate, wedges, onBrowseRegistry 
             Browse wedge registry →
           </button>
         </div>
+        ${(locations.length > 0 || allTags.length > 0) && html`
+          <div style=${{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+            ${locations.length > 0 && html`
+              <select value=${filterLoc} onChange=${(e) => setFilterLoc(e.target.value)}>
+                <option value="">All locations</option>
+                ${locations.map((l) => html`<option key=${l} value=${l}>${l}</option>`)}
+              </select>
+            `}
+            ${allTags.length > 0 && html`
+              <select value=${filterTag} onChange=${(e) => setFilterTag(e.target.value)}>
+                <option value="">All tags</option>
+                ${allTags.map((t) => html`<option key=${t} value=${t}>${t}</option>`)}
+              </select>
+            `}
+          </div>
+        `}
       </div>
       ${qrs.length === 0
         ? html`
             <div class="empty">
-              No QRs yet. Click <b>+ New</b> to create your first one.
+              No QRs match this filter.
             </div>
           `
         : qrs.map(
@@ -174,8 +198,13 @@ function QRList({ qrs, activeSlug, onSelect, onCreate, wedges, onBrowseRegistry 
                 <div class="title">${q.title || q.slug}</div>
                 <div class="slug">${q.slug}</div>
                 <div class="stats">
-                  ${q.wedge_id ? "▲ " + q.wedge_id : "no wedge"} · ${q.status}
+                  ${q.location ? "📍 " + q.location + " · " : ""}${q.wedge_id ? "▲ " + q.wedge_id : "no wedge"} · ${q.status}
                 </div>
+                ${q.tags && q.tags.length > 0 && html`
+                  <div style=${{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    ${q.tags.map((t) => html`<span key=${t} class="chip" style=${{ fontSize: 10 }}>${t}</span>`)}
+                  </div>
+                `}
               </div>
             `
           )}
@@ -523,6 +552,27 @@ function QREditor({ qr, onChange, onSave, onDelete, onCopyQR, publicBase, busy }
         </select>
       </div>
 
+      <div class="form-field">
+        <label>Location (physical placement)</label>
+        <input
+          value=${qr.location || ""}
+          onInput=${(e) => onChange({ ...qr, location: e.target.value })}
+          placeholder="e.g. Reading Room, Table 5"
+        />
+      </div>
+
+      <div class="form-field">
+        <label>Tags (comma-separated)</label>
+        <input
+          value=${(() => { try { return JSON.parse(qr.tags_json || "[]").join(", "); } catch { return ""; } })()}
+          onInput=${(e) => {
+            const tags = e.target.value.split(",").map((t) => t.trim()).filter(Boolean);
+            onChange({ ...qr, tags_json: JSON.stringify(tags) });
+          }}
+          placeholder="e.g. table, reading-room"
+        />
+      </div>
+
       <div class="section-title">Content blocks</div>
       ${(content.blocks || []).map(
         (b, i) => html`
@@ -651,6 +701,67 @@ function NewQR({ onCreate, onCancel, busy }) {
   `;
 }
 
+// ---------- Bulk new QR modal ----------
+const BULK_PLACEHOLDER =
+  "table-1-12\tLibrary Table\t\tReading Room\ttable,reading-room\n" +
+  "locker-a-d\tLibrary Locker\t\tEntry Hallway\tlocker,entry\n" +
+  "front-desk\tLibrary Front Desk\t\tLobby\treception";
+
+function parseBulkLine(line) {
+  const parts = line.split(/\t+|\|+| {2,}/).map((p) => p.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+  const [raw, title, wedge_id, location, tags] = parts;
+  return {
+    raw,
+    title,
+    wedge_id: wedge_id || undefined,
+    location: location || undefined,
+    tags: tags ? tags.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
+  };
+}
+
+function BulkNew({ onCreate, onCancel, busy }) {
+  const [text, setText] = useState(BULK_PLACEHOLDER);
+  const parsed = useMemo(() => {
+    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+    return lines.map(parseBulkLine);
+  }, [text]);
+  const valid = parsed.filter((p) => p !== null);
+  const invalid = parsed.length - valid.length;
+  return html`
+    <div class="modal-backdrop" onClick=${onCancel}>
+      <div class="modal" style=${{ maxWidth: 720, width: "92vw" }} onClick=${(e) => e.stopPropagation()}>
+        <div class="modal-header">
+          <h2>Bulk create QRs</h2>
+          <button class="secondary" onClick=${onCancel}>Cancel</button>
+        </div>
+        <div style=${{ padding: "12px 16px" }}>
+          <p style=${{ color: "var(--muted)", fontSize: 12, marginTop: 0 }}>
+            One spec per line. Columns: raw · title · wedge_id · location · tags.
+            Separators: tab, pipe, or 2+ spaces. raw accepts ranges (table-1-12, locker-a-d).
+          </p>
+          <textarea
+            rows="10"
+            value=${text}
+            onInput=${(e) => setText(e.target.value)}
+            style=${{ width: "100%", fontFamily: "ui-monospace, monospace", fontSize: 12 }}
+            autofocus
+          />
+          <div style=${{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>
+            ${valid.length} spec(s) parsed
+            ${invalid > 0 && html` · <span style=${{ color: "var(--danger)" }}>${invalid} line(s) invalid</span>`}
+          </div>
+        </div>
+        <div style=${{ padding: "12px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button class="secondary" onClick=${onCancel}>Cancel</button>
+          <button disabled=${busy || valid.length === 0} onClick=${() => onCreate(valid)}>
+            ${busy ? html`<span class="spinner" />` : `Create ${valid.length} QR(s)`}
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
 // ---------- Main app ----------
 function App() {
   const [auth, setAuth] = useState(() => {
@@ -665,16 +776,28 @@ function App() {
   const [activeSlug, setActiveSlug] = useState(null);
   const [draft, setDraft] = useState(null);
   const [showNew, setShowNew] = useState(false);
+  const [showBulk, setShowBulk] = useState(false);
   const [showRegistry, setShowRegistry] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [filterLoc, setFilterLoc] = useState("");
+  const [filterTag, setFilterTag] = useState("");
+  const [locations, setLocations] = useState([]);
+  const [allTags, setAllTags] = useState([]);
   const publicBase = (typeof window !== "undefined" && window.ZOQR_PAGES_BASE) || "";
 
   const refresh = useCallback(async () => {
     if (!auth) return;
     try {
-      const [qrs, wedges] = await Promise.all([api("/qrs"), api("/wedges")]);
+      const [qrs, wedges, locs, tags] = await Promise.all([
+        api("/qrs"),
+        api("/wedges"),
+        api("/locations"),
+        api("/tags"),
+      ]);
       setQrs(qrs);
       setWedges(wedges);
+      setLocations(locs || []);
+      setAllTags(tags || []);
       if (!activeSlug && qrs[0]) setActiveSlug(qrs[0].slug);
     } catch (e) {
       push(e.message, "err");
@@ -696,7 +819,7 @@ function App() {
     return html`<${Login} onLogin=${(t, ten) => setAuth({ token: t, tenant: ten })} />`;
   }
 
-  async function createQR(body) {
+async function createQR(body) {
     setBusy(true);
     try {
       const qr = await api("/qrs", { method: "POST", body });
@@ -711,6 +834,29 @@ function App() {
     }
   }
 
+  async function createBulk(specs) {
+    setBusy(true);
+    try {
+      const r = await api("/qrs/bulk", { method: "POST", body: { specs } });
+      setShowBulk(false);
+      await refresh();
+      const skippedMsg = r.skipped > 0 ? ` (${r.skipped} spec(s) skipped — all slugs taken)` : "";
+      push(`Created ${r.count} QR(s)${skippedMsg}`);
+    } catch (e) {
+      push(e.message, "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openPrint(filter) {
+    const url = new URL("/admin/api/print", window.location.origin);
+    if (auth?.tenant) url.searchParams.set("tenant", auth.tenant);
+    if (filterLoc) url.searchParams.set("location", filterLoc);
+    if (filterTag) url.searchParams.set("tag", filterTag);
+    window.open(url.toString(), "_blank");
+  }
+
   async function save() {
     if (!draft) return;
     setBusy(true);
@@ -721,6 +867,8 @@ function App() {
           title: draft.title,
           wedge_id: draft.wedge_id,
           content: draft.content,
+          location: draft.location ?? null,
+          tags: (() => { try { return JSON.parse(draft.tags_json || "[]"); } catch { return []; } })(),
         },
       });
       await refresh();
@@ -775,6 +923,16 @@ function App() {
     }
   }
 
+  const filteredQrs = qrs.filter((q) => {
+    if (filterLoc && q.location !== filterLoc) return false;
+    if (filterTag) {
+      let tags = [];
+      try { tags = JSON.parse(q.tags_json || "[]"); } catch {}
+      if (!tags.includes(filterTag)) return false;
+    }
+    return true;
+  });
+
   return html`
     <${React.Fragment}>
       <header>
@@ -795,12 +953,19 @@ function App() {
       </header>
       <main>
         <${QRList}
-          qrs=${qrs}
+          qrs=${filteredQrs}
           activeSlug=${activeSlug}
           onSelect=${(s) => setActiveSlug(s)}
           onCreate=${() => setShowNew(true)}
+          onBulk=${() => setShowBulk(true)}
+          onPrint=${openPrint}
           onBrowseRegistry=${() => setShowRegistry(true)}
           wedges=${wedges}
+          locations=${locations}
+          allTags=${allTags}
+          filterLoc=${filterLoc}
+          filterTag=${filterTag}
+
         />
         ${draft
           ? html`
@@ -828,6 +993,12 @@ function App() {
       html`<${NewQR}
         onCreate=${createQR}
         onCancel=${() => setShowNew(false)}
+        busy=${busy}
+      />`}
+      ${showBulk &&
+      html`<${BulkNew}
+        onCreate=${createBulk}
+        onCancel=${() => setShowBulk(false)}
         busy=${busy}
       />`}
       ${showRegistry &&

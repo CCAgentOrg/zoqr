@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { api } from "./routes/api.ts";
 import { admin } from "./routes/admin.ts";
+import { render } from "./routes/render.ts";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -25,6 +26,8 @@ app.use("*", logger());
 
 // Static SPA assets served at /admin and /admin/*
 const ADMIN_DIR = join(import.meta.dir, "..", "public");
+
+app.route("/", render);
 
 app.get("/", (c) =>
   c.html(`<!doctype html>
@@ -39,6 +42,8 @@ a{color:#2563eb}h1{margin-bottom:0}</style></head>
   <li><a href="/api/health">/api/health</a></li>
   <li><a href="/api/tenants">/api/tenants</a></li>
   <li><a href="/api/qrs">/api/qrs</a> (active QRs in default tenant)</li>
+  <li><a href="/q/test-cafe?tenant=demo">/q/test-cafe</a> (landing page)</li>
+  <li><a href="/qr/test-cafe.svg?tenant=demo">/qr/test-cafe.svg</a> (server-rendered QR SVG)</li>
 </ul>
 </body></html>`)
 );

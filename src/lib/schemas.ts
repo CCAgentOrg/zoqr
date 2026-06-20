@@ -87,6 +87,8 @@ export const QRCreateSchema = z.object({
   title: z.string().min(1).max(200),
   wedge_id: z.string().max(64).nullable().optional(),
   content: QRContentSchema.optional().default({ blocks: [], meta: {} }),
+  location: z.string().max(200).nullable().optional(),
+  tags: z.array(z.string().min(1).max(40)).max(10).optional(),
 });
 
 export const QRUpdateSchema = z.object({
@@ -94,6 +96,28 @@ export const QRUpdateSchema = z.object({
   wedge_id: z.string().max(64).nullable().optional(),
   content: QRContentSchema.optional(),
   status: z.enum(["active", "inactive"]).optional(),
+  location: z.string().max(200).nullable().optional(),
+  tags: z.array(z.string().min(1).max(40)).max(10).optional(),
+});
+
+/**
+ * Bulk-create: each spec expands via the range parser (e.g. "Tables 1-12")
+ * into one or more QRs. Total QRs across all specs is capped at 200.
+ */
+export const QRBulkCreateSchema = z.object({
+  specs: z
+    .array(
+      z.object({
+        raw: z.string().min(1).max(200), // e.g. "Tables 1-12" — used to compute slugs
+        title: z.string().min(1).max(200), // human-friendly title for each QR
+        wedge_id: z.string().max(64).nullable().optional(),
+        location: z.string().max(200).optional(),
+        tags: z.array(z.string().min(1).max(40)).max(10).optional(),
+        content: QRContentSchema.optional().default({ blocks: [], meta: {} }),
+      })
+    )
+    .min(1)
+    .max(50),
 });
 
 // ---- Submissions ----

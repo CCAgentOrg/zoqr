@@ -104,6 +104,36 @@ Install a wedge by ID + version.
 
 Uninstall a wedge.
 
+### `GET /admin/api/registry`
+
+Browse the upstream wedge registry (defaults to
+`CCAgentOrg/zoqr-wedges/main/INDEX.json`, override via
+`ZOQR_REGISTRY_URL`). Returns each wedge enriched with `name`,
+`description`, and `category` from its `manifest.json`.
+
+Cached in-memory for 5 minutes; pass `?fresh=1` to bypass. Falls back
+to the stale cache if the upstream is unreachable and adds `stale: true`.
+On cache miss + upstream down, returns HTTP 502.
+
+```json
+{
+  "source": "https://raw.githubusercontent.com/.../INDEX.json",
+  "wedges": [
+    {
+      "id": "menu-display",
+      "name": "Café Menu Display",
+      "description": "Restaurant/café table QR. ...",
+      "category": "restaurant",
+      "latest": "1.0.0",
+      "versions": ["1.0.0"],
+      "homepage": "https://github.com/.../menu-display/1.0.0"
+    }
+  ],
+  "cached": false,
+  "age_ms": 0
+}
+```
+
 ### `GET /admin/api/scans?slug=...&limit=100`
 
 Recent scan events for a QR.
